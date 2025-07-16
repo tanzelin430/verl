@@ -163,12 +163,13 @@ class AgentLoopBase(ABC):
         cls._class_initialized = True
 
     @abstractmethod
-    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any]) -> AgentLoopOutput:
+    async def run(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any], trajectory: dict[str, Any] = None) -> AgentLoopOutput:
         """Run agent loop to interact with LLM server and environment.
 
         Args:
             messages (List[Dict[str, Any]]): Input messages.
             sampling_params (Dict[str, Any]): LLM sampling params.
+            trajectory (Dict[str, Any], optional): Trajectory info containing global_steps.
 
         Returns:
             AgentLoopOutput: Agent loop output.
@@ -219,6 +220,23 @@ class AgentLoopWorker:
             agent_loop_configs = OmegaConf.load(agent_loop_config_path)
             for agent_loop_config in agent_loop_configs:
                 _agent_loop_registry[agent_loop_config.name] = agent_loop_config
+        
+        # Register craftax_agent if not already registered
+        if "craftax_agent" not in _agent_loop_registry:
+            try:
+                # Try to import and register CraftaxAgentLoop
+                import sys
+                import os
+                sys.path.append(os.getcwd())
+                from craftax_agent_loop import CraftaxAgentLoop
+                
+                # Register craftax_agent manually
+                _agent_loop_registry["craftax_agent"] = {
+                    "_target_": "craftax_agent_loop.CraftaxAgentLoop"
+                }
+            except ImportError:
+                # CraftaxAgentLoop not available, skip registration
+                pass
 
         trace_config = config.trainer.get("rollout_trace", {})
         trace_config = self.config.actor_rollout_ref.rollout.get("trace", {})
@@ -312,7 +330,7 @@ class AgentLoopWorker:
                 server_manager=self.server_manager,
                 tokenizer=self.tokenizer,
             )
-            output = await agent_loop.run(messages, sampling_params)
+            output = await agent_loop.run(messages, sampling_params, trajectory=trajectory)
             return output
 
     def _postprocess(self, inputs: list[AgentLoopOutput]) -> DataProto:
