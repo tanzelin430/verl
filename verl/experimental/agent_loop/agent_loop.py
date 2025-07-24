@@ -200,15 +200,17 @@ def register(agent_name: str):
 class AgentLoopWorker:
     """Agent loop worker takes a batch of messages and run each message in an agent loop."""
 
-    def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle]):
+    def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], wandb_run_info: dict = None):
         """Initialize agent loop manager.
 
         Args:
             config (DictConfig): YAML config.
             server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
+            wandb_run_info (dict, optional): Wandb run information from main process.
         """
         self.config = config
         self.server_manager = AsyncLLMServerManager(config, server_handles)
+        self.wandb_run_info = wandb_run_info  # 保存主进程的 wandb 信息
 
         model_path = config.actor_rollout_ref.model.path
         self.model_name = "/".join(model_path.split("/")[-2:])
@@ -234,6 +236,7 @@ class AgentLoopWorker:
                 _agent_loop_registry["craftax_agent"] = {
                     "_target_": "craftax_agent_loop.CraftaxAgentLoop"
                 }
+                print("CraftaxAgentLoop registered")
             except ImportError:
                 # CraftaxAgentLoop not available, skip registration
                 pass
@@ -324,12 +327,20 @@ class AgentLoopWorker:
             )
 
             agent_loop_config = _agent_loop_registry[agent_name]
-            agent_loop = hydra.utils.instantiate(
-                config=agent_loop_config,
-                trainer_config=_DummyConfig(config=self.config),
-                server_manager=self.server_manager,
-                tokenizer=self.tokenizer,
-            )
+            
+            # 检查是否是 CraftaxAgentLoop，如果是则传递 wandb_run_info
+            instantiate_kwargs = {
+                "config": agent_loop_config,
+                "trainer_config": _DummyConfig(config=self.config),
+                "server_manager": self.server_manager,
+                "tokenizer": self.tokenizer,
+            }
+            
+            if agent_name == "craftax_agent":
+                # 只有 CraftaxAgentLoop 需要 wandb_run_info 参数
+                instantiate_kwargs["wandb_run_info"] = self.wandb_run_info
+            
+            agent_loop = hydra.utils.instantiate(**instantiate_kwargs)
             output = await agent_loop.run(messages, sampling_params, trajectory=trajectory)
             return output
 
@@ -488,12 +499,41 @@ class AgentLoopManager:
         ray.get([server.init_engine.remote() for server in self.async_llm_servers])
 
     def _init_agent_loop_workers(self):
+        # 在 AgentLoopManager 中初始化 wandb（如果还没有的话）
+        wandb_run_info = None
+        try:
+            import wandb
+            if wandb.run is None:
+                # 从配置中获取项目和实验信息
+                project_name = getattr(self.config.trainer, "project_name", "craftax_ppo")
+                experiment_name = getattr(self.config.trainer, "experiment_name", "qwen3_craftax_v1")
+                
+                # 在 AgentLoopManager 中初始化 wandb
+                wandb.init(
+                    project=project_name,
+                    name=experiment_name,
+                    reinit=True,
+                )
+                print(f"📊 Initialized wandb in AgentLoopManager: {wandb.run.id}")
+            
+            # 获取 wandb run 信息传递给 workers
+            wandb_run_info = {
+                "id": wandb.run.id,
+                "project": wandb.run.project,
+                "name": wandb.run.name,
+                "entity": wandb.run.entity,
+            }
+            print(f"📊 Passing wandb run info to workers: {wandb_run_info}")
+            
+        except Exception as e:
+            print(f"⚠️ Failed to initialize/get wandb run info: {e}")
+            
         self.agent_loop_workers = []
         for i in range(self.config.actor_rollout_ref.rollout.agent.num_workers):
             self.agent_loop_workers.append(
                 AgentLoopWorker.options(
                     name=f"agent_loop_worker_{i}",
-                ).remote(self.config, self.async_llm_servers)
+                ).remote(self.config, self.async_llm_servers, wandb_run_info)
             )
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
