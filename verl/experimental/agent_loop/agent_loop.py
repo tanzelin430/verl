@@ -509,10 +509,18 @@ class AgentLoopManager:
                 experiment_name = getattr(self.config.trainer, "experiment_name", "qwen3_craftax_v1")
                 
                 # 在 AgentLoopManager 中初始化 wandb
+                import os
+                settings = wandb.Settings(init_timeout=90)
+                if hasattr(self.config.trainer, "wandb_proxy") and self.config.trainer.wandb_proxy:
+                    settings = wandb.Settings(https_proxy=self.config.trainer.wandb_proxy, init_timeout=90)
+                elif os.environ.get("https_proxy"):
+                    settings = wandb.Settings(https_proxy=os.environ.get("https_proxy"), init_timeout=90)
+                    
                 wandb.init(
                     project=project_name,
                     name=experiment_name,
                     reinit=True,
+                    settings=settings,
                 )
                 print(f"📊 Initialized wandb in AgentLoopManager: {wandb.run.id}")
             
